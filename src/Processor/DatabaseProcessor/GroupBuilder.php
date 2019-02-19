@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace RDS\Hydrogen\Processor\DatabaseProcessor;
 
+use Doctrine\ORM\Query\Expr\Composite;
 use Doctrine\ORM\QueryBuilder;
 use RDS\Hydrogen\Criteria\Where;
 use Doctrine\ORM\Query\Expr\Andx;
@@ -31,15 +32,9 @@ class GroupBuilder extends Builder
     ];
 
     /**
-     * @param QueryBuilder $builder
-     * @param Andx $context
-     * @param WhereGroup $group
-     * @return \Generator
+     * @var int
      */
-    protected function applyGroup(QueryBuilder $builder, Andx $context, WhereGroup $group): \Generator
-    {
-        return $this->apply($builder, $group);
-    }
+    private $nestedLevel = 0;
 
     /**
      * @param QueryBuilder $builder
@@ -48,13 +43,23 @@ class GroupBuilder extends Builder
      */
     public function apply($builder, CriterionInterface $group): ?iterable
     {
-        $expression = $builder->expr()->andX();
+        ++$this->nestedLevel;
+        $expression = $group->isAnd() ? $builder->expr()->andX() : $builder->expr()->orX();
 
         foreach ($this->getInnerSelections($group) as $criterion => $fn) {
             yield from $fn($builder, $expression, $criterion);
         }
 
-        return $group->isAnd() ? $builder->andWhere($expression) : $builder->orWhere($expression);
+        --$this->nestedLevel;
+        if ($this->nestedLevel === 0) {
+            if ($group->isAnd()) {
+                $builder->andWhere($expression);
+            } else {
+                $builder->orWhere($expression);
+            }
+        }
+
+        return $expression->getParts();
     }
 
     /**
@@ -81,18 +86,34 @@ class GroupBuilder extends Builder
     /**
      * @param QueryBuilder $builder
      * @param Andx $context
+     * @param WhereGroup $group
+     * @return \Generator
+     */
+    protected function applyGroup(QueryBuilder $builder, Composite $context, WhereGroup $group): \Generator
+    {
+        $expression = $group->isAnd() ? $builder->expr()->andX() : $builder->expr()->orX();
+
+        yield from $parts = $this->apply($builder, $group);
+
+        foreach ($parts->getReturn() as $part) {
+            $expression->add($part);
+        }
+
+        $context->add($expression);
+    }
+
+    /**
+     * @param QueryBuilder $builder
+     * @param Andx $context
      * @param Where $where
      * @return \Generator
      */
-    protected function applyWhere(QueryBuilder $builder, Andx $context, Where $where): \Generator
+    protected function applyWhere(QueryBuilder $builder, Composite $context, Where $where): \Generator
     {
         $expression = new Expression($builder, $where->getOperator(), $where->getValue());
         yield from $result = $expression->create($where->getField());
 
-        if ($where->isAnd()) {
-            $context->add($result->getReturn());
-        } else {
-            $builder->orWhere($result->getReturn());
-        }
+        $context->add($result->getReturn());
     }
 }
+
